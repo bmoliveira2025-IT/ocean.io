@@ -605,10 +605,18 @@ class Snake {
       this.boostEnergy = Math.min(100, this.boostEnergy + dt * 10);
     }
 
-    this.angle = lerpAngle(this.angle, this.targetAngle, dt * turn);
-
-    this.x += Math.cos(this.angle) * speed * dt;
-    this.y += Math.sin(this.angle) * speed * dt;
+    // --- INTERPOLAÇÃO MULTIJOGADOR ---
+    if (this.targetX !== undefined) {
+      // Suaviza a posição para onde o servidor diz que estamos
+      this.x = lerp(this.x, this.targetX, 0.4);
+      this.y = lerp(this.y, this.targetY, 0.4);
+      this.angle = lerpAngle(this.angle, this.targetAngle, 0.3);
+    } else {
+      // Fallback: Movimentação local (para bots ou offline)
+      this.angle = lerpAngle(this.angle, this.targetAngle, dt * turn);
+      this.x += Math.cos(this.angle) * speed * dt;
+      this.y += Math.sin(this.angle) * speed * dt;
+    }
 
     const dx = this.x - WORLD_CENTER;
     const dy = this.y - WORLD_CENTER;
@@ -1713,6 +1721,28 @@ export default function App() {
         if (snake.isPlayer) s.player = snake;
         return snake;
       });
+
+      // --- ATUALIZAÇÃO DA UI (REACT STATE) ---
+      setTotalPlayers(snakes.length);
+      
+      const lb = [...snakes]
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 10)
+        .map((player, i) => ({
+          rank: i + 1,
+          name: player.name,
+          score: Math.floor(player.score / 10),
+          color: player.color,
+          isMe: player.id === s.playerId
+        }));
+      setLeaderboard(lb);
+
+      const myRankInfo = lb.find(p => p.isMe);
+      if (myRankInfo) setPlayerRank(myRankInfo.rank);
+      else if (s.player) {
+         // Se não estiver no top 10, calcula o rank real (opcional: o servidor poderia enviar)
+         setPlayerRank("?"); 
+      }
 
       // Processa eventos do servidor (mortes, coletáveis, etc)
       events.forEach(ev => {

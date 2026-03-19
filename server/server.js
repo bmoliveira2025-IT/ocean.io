@@ -50,7 +50,7 @@ io.on('connection', (socket) => {
       socket.emit('joined', {
         playerId: socket.id,
         orbs,
-        worldSize: 6000
+        worldSize: room.worldRadius * 2
       });
 
       console.log(`[Room ${roomId}] ${name} entrou. Total: ${room.players.size} jogadores.`);

@@ -1681,9 +1681,11 @@ export default function App() {
           snake.id = dto.id;
         }
         
-        snake.x = dto.x;
-        snake.y = dto.y;
-        snake.angle = dto.angle;
+        // Dados para interpolação (suavidade)
+        snake.targetX = dto.x;
+        snake.targetY = dto.y;
+        snake.targetAngle = dto.angle;
+        
         snake.score = dto.score;
         snake.isBoosting = dto.isBoosting;
         snake.shieldTimer = dto.shieldTimer;
@@ -1698,7 +1700,7 @@ export default function App() {
         return snake;
       });
 
-      // Processa eventos do servidor (mortes, etc)
+      // Processa eventos do servidor (mortes, coletáveis, etc)
       events.forEach(ev => {
         if (ev.type === 'death') {
           spawnExplosion(ev.x, ev.y, COLORS.coral, 30);
@@ -1706,6 +1708,8 @@ export default function App() {
             setGameState('GAMEOVER');
             if (s.audio) s.audio.play('death');
           }
+        } else if (ev.type === 'orbCollected') {
+          s.orbs = s.orbs.filter(o => o.id !== ev.orbId);
         }
       });
     });
@@ -1923,6 +1927,17 @@ export default function App() {
         isBoosting: s.player.isBoosting
       });
     }
+
+    // Interpolação local para rodar a 60 FPS suave
+    s.snakes.forEach(snake => {
+      // Interpola as coordenadas recebidas do servidor
+      if (snake.targetX !== undefined) {
+        // Interpolação linear da posição (ajuste o fator para mais ou menos 'atraso')
+        snake.x = lerp(snake.x, snake.targetX, dt * 15);
+        snake.y = lerp(snake.y, snake.targetY, dt * 15);
+        snake.angle = lerpAngle(snake.angle, snake.targetAngle, dt * 10);
+      }
+    });
 
     // Atualiza partículas locais (efeitos visuais)
     for (let i = s.particles.length - 1; i >= 0; i--) {

@@ -65,6 +65,10 @@ io.on('connection', (socket) => {
     if (room) room.updateInput(socket.id, input);
   });
 
+  socket.on('ping_request', (startTime) => {
+    socket.emit('pong_response', startTime);
+  });
+
   socket.on('disconnect', (reason) => {
     const roomId = socket.data.roomId;
     const room = rooms.get(roomId);

@@ -4,7 +4,7 @@ import { io } from 'socket.io-client';
 // ==========================================
 // CONSTANTS & CONFIG
 // ==========================================
-const WORLD_CENTER = 3000; // Alinhado com o servidor (0 a 6000)
+const WORLD_CENTER = 20000; // Ponto central solicitado para permitir mapas colossais
 const BASE_SPEED = 140; 
 const BOOST_SPEED = 450;
 const TURN_SPEED = 4.0;
@@ -1628,6 +1628,8 @@ export default function App() {
     return 0;
   });
 
+  const [ping, setPing] = useState(0);
+
   const state = useRef({
     socket: null,
     playerId: null,
@@ -1659,6 +1661,15 @@ export default function App() {
     const socket = io(socketUrl);
     state.current.socket = socket;
 
+    const pingInterval = setInterval(() => {
+      const start = Date.now();
+      socket.emit('ping_request', start);
+    }, 2000);
+
+    socket.on('pong_response', (start) => {
+      setPing(Date.now() - start);
+    });
+
     socket.on('connect', () => console.log('Conectado ao servidor multijogador!'));
 
     socket.on('joined', ({ playerId, orbs, worldSize }) => {
@@ -1670,9 +1681,11 @@ export default function App() {
       state.current.orbs = orbs.map(o => new Orb(o.id, o.x, o.y, o.isPowerup, o.type, o.color, o.size));
     });
 
-    socket.on('state', ({ snakes, events }) => {
+    socket.on('state', ({ snakes, events, worldRadius }) => {
       const s = state.current;
-      // Atualiza cobras (simples por enquanto: substitui tudo, ideal seria interpolar)
+      
+      // Atualiza o raio do mundo dinamicamente
+      if (worldRadius) s.worldRadius = worldRadius;
       s.snakes = snakes.map(dto => {
         // Tenta reaproveitar instância local se existir para manter suavidade
         let snake = s.snakes.find(ls => ls.id === dto.id);
@@ -1725,7 +1738,10 @@ export default function App() {
       state.current.orbs = state.current.orbs.filter(o => o.id !== orbId);
     });
 
-    return () => socket.disconnect();
+    return () => {
+      clearInterval(pingInterval);
+      socket.disconnect();
+    };
   }, []);
 
   useEffect(() => {
@@ -1950,22 +1966,26 @@ export default function App() {
     }
 
     // A lógica de orbs e cobras agora vem do servidor via socket.on('state')
-    // Apenas atualizamos a câmera para seguir o jogador local
+    // --- CÂMERA ORGÂNICA E ZOOM INTELIGENTE ---
     if (s.player && !s.player.dead) {
+      s.camera.baseZoomPulse += dt;
+      
       const lookAheadDist = s.player.isBoosting ? 200 : 60;
       const targetCamX = s.player.x + Math.cos(s.player.angle) * lookAheadDist;
       const targetCamY = s.player.y + Math.sin(s.player.angle) * lookAheadDist;
-
+      
       s.camera.x = lerp(s.camera.x, targetCamX, dt * 3.5);
       s.camera.y = lerp(s.camera.y, targetCamY, dt * 3.5);
       
-      let baseZoom = Math.max(0.65, 1.3 * Math.pow(500 / Math.max(500, s.player.score), 0.15));
+      // Zoom mais fechado inicialmente (2.2) e escala ultra lenta (0.06)
+      // Isso mantém o foco no jogador e evita que a tela "fuja" demais
+      let baseZoom = Math.max(0.6, 2.2 * Math.pow(500 / Math.max(500, s.player.score), 0.06));
       
-      // Restaura o pulso suave na câmera
-      baseZoom += Math.sin(s.camera.baseZoomPulse * 1.5) * 0.02;
+      // Efeito de "respiração" da câmera (pulso orgânico suave)
+      baseZoom += Math.sin(s.camera.baseZoomPulse * 1.2) * 0.012;
 
-      if (s.player.isBoosting) baseZoom *= 0.85; 
-      s.camera.zoom = lerp(s.camera.zoom, baseZoom, dt * 2.0); 
+      if (s.player.isBoosting) baseZoom *= 0.92; // Redução mínima no boost para não perder foco
+      s.camera.zoom = lerp(s.camera.zoom, baseZoom, dt * 1.2); 
 
       setScore(Math.floor(s.player.score));
       setPowerups({
@@ -2171,8 +2191,12 @@ export default function App() {
       {gameState === 'PLAYING' && (
         <>
           <div className="absolute top-4 left-4 text-white/80 pointer-events-none drop-shadow-md text-sm leading-tight z-10 bg-black/30 p-3 rounded-xl backdrop-blur-sm border border-white/10">
-            <p>Seu comprimento: <b className="text-white text-base">{Math.floor(score / 10)}</b></p>
+            <p className="text-white font-bold text-sm flex items-center gap-1">Comprimento: <span className="text-green-400 font-black">{Math.floor(score / 10)}</span></p>
             <p className="text-white/60 text-xs mt-1">Classificação: <span className="text-yellow-400 font-bold">{playerRank}</span> de {totalPlayers}</p>
+            <p className="text-gray-400 text-[10px] mt-1 flex items-center gap-1">
+              <span className={`w-2 h-2 rounded-full ${ping < 100 ? 'bg-green-500' : 'bg-yellow-500'}`}></span>
+              Ping: {ping}ms
+            </p>
             <p className="text-yellow-400 font-bold text-sm mt-1 flex items-center gap-1">🪙 {state.current.player?.sessionCoins || 0}</p>
           </div>
 

@@ -1,5 +1,6 @@
 // GameRoom.js – Lógica do servidor de jogo
-const WORLD_SIZE = 6000;
+const WORLD_SIZE_BASE = 40000;
+const WORLD_CENTER_COORD = 20000; // Centro fixo solicitado para mapas colossais
 const BASE_SPEED = 140;
 const BOOST_SPEED = 252;
 const TURN_SPEED = 4.0;
@@ -27,8 +28,11 @@ const ORB_COLORS = ['#52b788', '#e07a5f', '#1a6fa8', '#f4d03f', '#9b59b6'];
 class Orb {
   constructor() {
     this.id = Math.random().toString(36).substring(2, 9);
-    this.x = randomRange(100, WORLD_SIZE - 100);
-    this.y = randomRange(100, WORLD_SIZE - 100);
+    // Spawn relativo ao centro
+    const angle = Math.random() * Math.PI * 2;
+    const r = Math.random() * 3000; 
+    this.x = WORLD_CENTER_COORD + Math.cos(angle) * r;
+    this.y = WORLD_CENTER_COORD + Math.sin(angle) * r;
     this.value = randomRange(10, 30);
     this.size = Math.sqrt(this.value) * 1.5;
     this.color = ORB_COLORS[Math.floor(Math.random() * ORB_COLORS.length)];
@@ -55,8 +59,10 @@ class Snake {
     this.name = name;
     this.color = skinColor || '#39ff14';
     this.isBot = isBot;
-    this.x = randomRange(500, WORLD_SIZE - 500);
-    this.y = randomRange(500, WORLD_SIZE - 500);
+    const angle = Math.random() * Math.PI * 2;
+    const r = Math.random() * 2000; 
+    this.x = WORLD_CENTER_COORD + Math.cos(angle) * r;
+    this.y = WORLD_CENTER_COORD + Math.sin(angle) * r;
     this.angle = Math.random() * Math.PI * 2;
     this.targetAngle = this.angle;
     this.score = 500;
@@ -184,6 +190,9 @@ class GameRoom {
     this.lastTime = Date.now();
     this.events = []; // Events to broadcast this tick (kills, etc.)
 
+    this.worldRadius = 3000;
+    this.targetWorldRadius = 3000;
+
     this._spawnInitialOrbs(1500);
     this._spawnBots(30);
     this._startTick();
@@ -252,6 +261,8 @@ class GameRoom {
     this.lastTime = now;
     this.events = [];
 
+    this._updateWorldSize(dt);
+
     const allSnakes = [...this.players.values(), ...this.bots];
 
     // Update snakes
@@ -282,6 +293,12 @@ class GameRoom {
           setTimeout(() => {
             if (this.orbs.size < 1500) {
               const newOrb = new Orb();
+              // Ajusta o spawn para ser dentro do raio atual
+              const angle = Math.random() * Math.PI * 2;
+              const r = Math.random() * this.worldRadius;
+              newOrb.x = WORLD_CENTER_COORD + Math.cos(angle) * r;
+              newOrb.y = WORLD_CENTER_COORD + Math.sin(angle) * r;
+              
               this.orbs.set(newOrb.id, newOrb);
               this.io.to(this.id).emit('orbSpawn', [{ id: newOrb.id, x: Math.round(newOrb.x), y: Math.round(newOrb.y), color: newOrb.color, size: newOrb.size, isPowerup: false }]);
             }
@@ -294,6 +311,16 @@ class GameRoom {
     // Collision detection (head vs body)
     allSnakes.forEach(attacker => {
       if (attacker.dead || attacker.spawnProtection > 0) return;
+      
+      // Limite do mapa circular dinâmico
+      const dToCenter = Math.sqrt(distSq(attacker.x, attacker.y, WORLD_CENTER_COORD, WORLD_CENTER_COORD));
+      if (dToCenter > this.worldRadius) {
+         attacker.dead = true;
+         this._dropSnakeOrbs(attacker);
+         this.events.push({ type: 'death', deadId: attacker.id, name: attacker.name, killerName: 'Oceano Profundo' });
+         return;
+      }
+
       allSnakes.forEach(defender => {
         if (defender === attacker || defender.dead) return;
         defender.body.forEach((seg, i) => {
@@ -334,8 +361,22 @@ class GameRoom {
     this.io.to(this.id).emit('state', {
       snakes: [...playerDTOs, ...botDTOs],
       events: this.events,
+      worldRadius: Math.round(this.worldRadius),
       tick: Date.now()
     });
+  }
+
+  _updateWorldSize(dt) {
+    const playerFactor = this.players.size * 200;
+    const allSnakes = [...this.players.values(), ...this.bots];
+    const maxScore = allSnakes.length > 0 ? Math.max(...allSnakes.map(s => s.score)) : 500;
+    const scoreFactor = Math.sqrt(maxScore) * 15;
+    
+    // Alvo: Base (2500) + bônus por jogador + bônus pela maior cobra
+    this.targetWorldRadius = 2500 + playerFactor + scoreFactor;
+    
+    // Expansão ultra-suave
+    this.worldRadius = lerp(this.worldRadius, this.targetWorldRadius, dt * 0.2);
   }
 
   _dropSnakeOrbs(snake) {

@@ -1,10 +1,9 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { io } from 'socket.io-client';
 
 // ==========================================
 // CONSTANTS & CONFIG
 // ==========================================
-const WORLD_CENTER = 3000; // Alinhado com o servidor (0 a 6000)
+const WORLD_CENTER = 20000; // Ponto central do universo gigante para permitir mapas colossais
 const BASE_SPEED = 140; 
 const BOOST_SPEED = 450;
 const TURN_SPEED = 4.0;
@@ -412,8 +411,8 @@ class Particle {
 }
 
 class Orb {
-  constructor(id, x, y, isPowerup = false, type = 0, specificColor = null, size = null) {
-    this.id = id || Math.random().toString(36);
+  constructor(x, y, isPowerup = false, type = 0, specificColor = null) {
+    this.id = Math.random().toString(36);
     this.x = x;
     this.y = y;
     this.isPowerup = isPowerup;
@@ -1629,8 +1628,6 @@ export default function App() {
   });
 
   const state = useRef({
-    socket: null,
-    playerId: null,
     snakes: [],
     orbs: [],
     particles: [],
@@ -1649,83 +1646,6 @@ export default function App() {
     lastKingId: null,
     settings: { bgm: true, sfx: true, quality: 'high' } 
   });
-
-  // --- NOVO: Conexão Socket.io para Multijogador ---
-  useEffect(() => {
-    // Conecta ao servidor (usa o mesmo domínio da página, mas na porta 3001)
-    const socketUrl = process.env.NODE_ENV === 'production' 
-      ? `http://${window.location.hostname}:3001` 
-      : 'http://localhost:3001';
-    const socket = io(socketUrl);
-    state.current.socket = socket;
-
-    socket.on('connect', () => console.log('Conectado ao servidor multijogador!'));
-
-    socket.on('joined', ({ playerId, orbs, worldSize }) => {
-      state.current.playerId = playerId;
-      // No servidor, o mundo é 0-6000. No cliente, centralizamos em 3000.
-      state.current.worldRadius = worldSize / 2;
-      
-      // Carregar orbs iniciais do servidor
-      state.current.orbs = orbs.map(o => new Orb(o.id, o.x, o.y, o.isPowerup, o.type, o.color, o.size));
-    });
-
-    socket.on('state', ({ snakes, events }) => {
-      const s = state.current;
-      // Atualiza cobras (simples por enquanto: substitui tudo, ideal seria interpolar)
-      s.snakes = snakes.map(dto => {
-        // Tenta reaproveitar instância local se existir para manter suavidade
-        let snake = s.snakes.find(ls => ls.id === dto.id);
-        if (!snake) {
-          snake = new Snake(dto.x, dto.y, dto.name, dto.id === s.playerId, { color: dto.color, type: 'cyclops' });
-          snake.id = dto.id;
-        }
-        
-        // Dados para interpolação (suavidade)
-        snake.targetX = dto.x;
-        snake.targetY = dto.y;
-        snake.targetAngle = dto.angle;
-        
-        snake.score = dto.score;
-        snake.isBoosting = dto.isBoosting;
-        snake.shieldTimer = dto.shieldTimer;
-        snake.speedTimer = dto.speedTimer;
-        
-        // Atualiza corpo do DTO (o DTO envia apenas alguns segmentos para economizar banda)
-        if (dto.body) {
-          snake.body = dto.body.map(seg => ({ x: seg[0], y: seg[1] }));
-        }
-        
-        if (snake.isPlayer) s.player = snake;
-        return snake;
-      });
-
-      // Processa eventos do servidor (mortes, coletáveis, etc)
-      events.forEach(ev => {
-        if (ev.type === 'death') {
-          spawnExplosion(ev.x, ev.y, COLORS.coral, 30);
-          if (ev.deadId === s.playerId) {
-            setGameState('GAMEOVER');
-            if (s.audio) s.audio.play('death');
-          }
-        } else if (ev.type === 'orbCollected') {
-          s.orbs = s.orbs.filter(o => o.id !== ev.orbId);
-        }
-      });
-    });
-
-    socket.on('orbSpawn', (newOrbs) => {
-      newOrbs.forEach(o => {
-        state.current.orbs.push(new Orb(o.id, o.x, o.y, o.isPowerup, o.type, o.color, o.size));
-      });
-    });
-
-    socket.on('orbCollected', ({ orbId }) => {
-      state.current.orbs = state.current.orbs.filter(o => o.id !== orbId);
-    });
-
-    return () => socket.disconnect();
-  }, []);
 
   useEffect(() => {
     state.current.settings = settings;
@@ -1799,7 +1719,6 @@ export default function App() {
 
   const startGame = () => {
     const s = state.current;
-    if (!s.socket) return;
     s.audio.init();
     
     s.snakes = [];
@@ -1809,15 +1728,27 @@ export default function App() {
     s.eventQueue = [];
     s.lastKingId = null;
 
+    s.worldRadius = 2000;
+
     const finalName = playerName.trim() === '' ? 'Anônimo' : playerName.trim();
     const chosenSkin = SKINS[selectedSkinIndex];
     
-    // Solicita entrada no servidor multijogador
-    s.socket.emit('join', { 
-      name: finalName, 
-      skinColor: chosenSkin.color,
-      roomId: 'global' 
-    });
+    const pos = getSafeSpawnPosition(s.snakes, s.worldRadius);
+    s.player = new Snake(pos.x, pos.y, finalName, true, chosenSkin);
+    s.snakes.push(s.player);
+    
+    for (let i = 0; i < 600; i++) {
+      const p = getRandPosInCircle(s.worldRadius);
+      spawnOrb(p.x, p.y, 10);
+    }
+
+    for (let i = 0; i < 5; i++) {
+      const type = Math.random() < 0.5 ? 3 : Math.floor(Math.random() * 3);
+      const p = getRandPosInCircle(s.worldRadius);
+      spawnOrb(p.x, p.y, 0, true, type);
+    }
+    
+    for (let i = 0; i < 15; i++) spawnBot();
 
     setGameState('PLAYING');
     setScore(500);
@@ -1918,59 +1849,249 @@ export default function App() {
     
     s.worldRadius = lerp(s.worldRadius, finalTargetRadius, dt * 0.015);
 
-    // --- MULTIPLAYER UPDATE ---
-    // Envia input para o servidor
-    if (s.player && s.socket && s.socket.connected) {
-      const inputAngle = Math.atan2(s.mouseY - canvas.height / 2, s.mouseX - canvas.width / 2);
-      s.socket.emit('input', {
-        angle: inputAngle,
-        isBoosting: s.player.isBoosting
-      });
+    let pTarget = null;
+    if (s.player && !s.player.dead) {
+      const screenX = canvas.width / 2;
+      const screenY = canvas.height / 2;
+      const dx = (s.mouseX - screenX) / s.camera.zoom;
+      const dy = (s.mouseY - screenY) / s.camera.zoom;
+      pTarget = { x: s.player.x + dx, y: s.player.y + dy };
     }
 
-    // Interpolação local para rodar a 60 FPS suave
+    if (Math.random() < 2.0 * dt) {
+      const type = Math.random() < 0.4 ? 3 : Math.floor(Math.random() * 3);
+      const currentCount = s.orbs.filter(o => o.isPowerup && o.type === type).length;
+      const maxAllowed = type === 3 ? 15 : 4; 
+      
+      if (currentCount < maxAllowed) {
+        const p = getRandPosInCircle(s.worldRadius);
+        spawnOrb(p.x, p.y, 0, true, type);
+      }
+    }
+
+    if (s.snakes.length < 35 && Math.random() < 0.4 * dt) {
+      spawnBot();
+    }
+
     s.snakes.forEach(snake => {
-      // Interpola as coordenadas recebidas do servidor
-      if (snake.targetX !== undefined) {
-        // Interpolação linear da posição (ajuste o fator para mais ou menos 'atraso')
-        snake.x = lerp(snake.x, snake.targetX, dt * 15);
-        snake.y = lerp(snake.y, snake.targetY, dt * 15);
-        snake.angle = lerpAngle(snake.angle, snake.targetAngle, dt * 10);
+      if (!snake.isPlayer && !snake.aiTarget && Math.random() < 0.1) {
+        const nearby = s.spatialHash.getNearby(snake.x, snake.y, 800);
+        const snk = nearby.find(n => n instanceof Snake && n !== snake && !n.dead);
+        if (snk) snake.aiTarget = snk;
+      }
+
+      snake.update(dt, snake.isPlayer ? pTarget : null, s.spatialHash, s.worldRadius, s.settings.quality);
+      
+      if (snake.isBoosting && snake.score > 150) {
+        snake.boostDropTimer = (snake.boostDropTimer || 0) + dt;
+        if (snake.boostDropTimer > 0.15) { 
+          snake.boostDropTimer = 0;
+          const tail = snake.body[snake.body.length - 1];
+          let dropColor = snake.color;
+          if (snake.skinType.startsWith('dragon')) dropColor = COLORS.danger;
+          else if (snake.skinType === 'seahorse') dropColor = [COLORS.brGreen, COLORS.brYellow, COLORS.brBlue][Math.floor(Math.random() * 3)];
+          
+          spawnOrb(tail.x + randomRange(-5, 5), tail.y + randomRange(-5, 5), 3, false, 0, dropColor);
+        }
+      }
+
+      if (snake.hitWall && !snake.dead) {
+        snake.dead = true;
+
+        if (snake.isPlayer) s.audio.play('death');
+        else if (s.player && distSq(snake.x, snake.y, s.player.x, s.player.y) < 1000*1000) {
+           s.audio.play('shield_break', 0.3); 
+        }
+
+        if (snake.isPlayer) {
+          s.finalScore = snake.score;
+          const sessionC = snake.sessionCoins || 0;
+          const bonusC = Math.floor(snake.score / 500); 
+          s.earnedCoins = sessionC + bonusC;
+          setGameState('GAMEOVER');
+          
+          setCoins(prev => {
+            const novo = prev + s.earnedCoins;
+            localStorage.setItem('ocean_coins', novo.toString());
+            return novo;
+          });
+          
+          setHighScore(prev => {
+            const finalLength = Math.floor(snake.score / 10);
+            if (finalLength > prev) {
+               localStorage.setItem('ocean_highscore', finalLength.toString());
+               return finalLength;
+            }
+            return prev;
+          });
+        }
+
+        snake.body.forEach((seg, idx) => {
+          if (idx % 2 === 0) {
+            spawnOrb(seg.x + randomRange(-10, 10), seg.y + randomRange(-10, 10), Math.max(10, snake.score / snake.body.length * 2));
+          }
+        });
+        spawnExplosion(snake.x, snake.y, snake.color, 40);
+      }
+
+      if (snake.isBoosting && Math.random() < 0.3 && s.settings.quality !== 'low') {
+        s.particles.push(new Particle(
+          snake.body[snake.body.length - 1].x, 
+          snake.body[snake.body.length - 1].y, 
+          'rgba(255, 255, 255, 0.6)', 0.5, 'bubble'
+        ));
       }
     });
 
-    // Reativa movimentação interativa da comida (bobbing local)
-    s.orbs.forEach(orb => orb.update(dt, s.worldRadius));
+    s.spatialHash.clear();
+    s.orbs.forEach(orb => {
+      orb.update(dt, s.worldRadius);
+      if (!orb.absorbedBy) s.spatialHash.insert(orb);
+    });
 
-    // A lógica de orbs e cobras agora vem do servidor via socket.on('state')
-    // Apenas atualizamos a câmera para seguir o jogador local
-    if (s.player && !s.player.dead) {
-      const lookAheadDist = s.player.isBoosting ? 200 : 60;
-      const targetCamX = s.player.x + Math.cos(s.player.angle) * lookAheadDist;
-      const targetCamY = s.player.y + Math.sin(s.player.angle) * lookAheadDist;
+    s.snakes.forEach(snake => {
+      if (!snake.dead) {
+        const collisionStep = Math.max(3, Math.floor(snake.size / 8)); 
+        snake.body.forEach((seg, i) => {
+          if (i % collisionStep === 0) { 
+             s.spatialHash.insert({ x: seg.x, y: seg.y, isBody: true, parent: snake, index: i });
+          }
+        });
+      }
+    });
 
-      s.camera.x = lerp(s.camera.x, targetCamX, dt * 3.5);
-      s.camera.y = lerp(s.camera.y, targetCamY, dt * 3.5);
+    s.snakes.forEach(snake => {
+      if (snake.dead) return;
       
-      let baseZoom = Math.max(0.65, 1.3 * Math.pow(500 / Math.max(500, s.player.score), 0.15));
+      if (snake.magnetTimer > 0) {
+        const nearbyOrbs = s.spatialHash.getNearby(snake.x, snake.y, 200).filter(o => o instanceof Orb);
+        nearbyOrbs.forEach(orb => {
+          if (!orb.absorbedBy) {
+             const dist = distSq(snake.x, snake.y, orb.x, orb.y);
+             if (dist < 200 * 200) {
+               orb.x = lerp(orb.x, snake.x, dt * 5);
+               orb.y = lerp(orb.y, snake.y, dt * 5);
+             }
+          }
+        });
+      }
+
+      const collectRadius = snake.size * 1.5;
+      const nearby = s.spatialHash.getNearby(snake.x, snake.y, collectRadius * 2);
       
-      // Restaura o pulso suave na câmera
-      baseZoom += Math.sin(s.camera.baseZoomPulse * 1.5) * 0.02;
-
-      if (s.player.isBoosting) baseZoom *= 0.85; 
-      s.camera.zoom = lerp(s.camera.zoom, baseZoom, dt * 2.0); 
-
-      setScore(Math.floor(s.player.score));
-      setPowerups({
-        shield: Math.max(0, s.player.shieldTimer),
-        speed: Math.max(0, s.player.speedTimer),
-        magnet: 0 
+      nearby.forEach(item => {
+        if (item instanceof Orb && !item.absorbedBy) {
+          const dSq = distSq(snake.x, snake.y, item.x, item.y);
+          if (dSq < collectRadius * collectRadius) {
+            item.absorbedBy = snake;
+            
+            if (item.isPowerup) {
+              if (item.type === 0) snake.shieldTimer = 8;
+              if (item.type === 1) snake.speedTimer = 6;
+              if (item.type === 2) snake.magnetTimer = 10;
+              if (item.type === 3) {
+                 snake.sessionCoins += 1;
+                 if (snake.isPlayer) s.audio.play('coin', 0.6); 
+              } else {
+                 if (snake.isPlayer) s.audio.play('powerup');
+              }
+            } else {
+              snake.score += item.value;
+              if (snake.isPlayer && Math.random() < 0.3) s.audio.play('pop', 0.15); 
+            }
+          }
+        }
       });
+    });
+
+    for (let i = 0; i < s.snakes.length; i++) {
+      const attacker = s.snakes[i];
+      if (attacker.dead || attacker.spawnProtectionTimer > 0) continue; 
+
+      const hitRadius = attacker.size * 0.8;
+      const nearby = s.spatialHash.getNearby(attacker.x, attacker.y, hitRadius + 30);
+      
+      for (const item of nearby) {
+        if (item.isBody && item.parent !== attacker) {
+          const defender = item.parent;
+          if (defender.dead || defender.spawnProtectionTimer > 0) continue; 
+          
+          const bodySize = defender.size * 0.8;
+          
+          if (distSq(attacker.x, attacker.y, item.x, item.y) < (hitRadius + bodySize) ** 2) {
+            if (attacker.shieldTimer > 0) {
+              attacker.shieldTimer = 0;
+              if (attacker.isPlayer) s.audio.play('shield_break');
+              spawnExplosion(attacker.x, attacker.y, COLORS.turquoise, 20);
+              
+              attacker.angle += Math.PI;
+              attacker.x += Math.cos(attacker.angle) * 50;
+              attacker.y += Math.sin(attacker.angle) * 50;
+              break; 
+            } else {
+              attacker.dead = true;
+
+              if (attacker.isPlayer) s.audio.play('death');
+              else if (s.player && distSq(attacker.x, attacker.y, s.player.x, s.player.y) < 1000*1000) {
+                 s.audio.play('shield_break', 0.3); 
+              }
+              
+              if (attacker.isPlayer) {
+                s.finalScore = attacker.score;
+                const sessionC = attacker.sessionCoins || 0;
+                const bonusC = Math.floor(attacker.score / 500);
+                s.earnedCoins = sessionC + bonusC;
+                setGameState('GAMEOVER');
+                
+                setCoins(prev => {
+                  const novo = prev + s.earnedCoins;
+                  localStorage.setItem('ocean_coins', novo.toString());
+                  return novo;
+                });
+                
+                setHighScore(prev => {
+                  const finalLength = Math.floor(attacker.score / 10);
+                  if (finalLength > prev) {
+                     localStorage.setItem('ocean_highscore', finalLength.toString());
+                     return finalLength;
+                  }
+                  return prev;
+                });
+              }
+
+              attacker.body.forEach((seg, idx) => {
+                if (idx % 2 === 0) {
+                  spawnOrb(seg.x + randomRange(-10, 10), seg.y + randomRange(-10, 10), Math.max(10, attacker.score / attacker.body.length * 2));
+                }
+              });
+              spawnExplosion(attacker.x, attacker.y, attacker.color, 40);
+              break;
+            }
+          }
+        }
+      }
     }
 
-    // O Rei é calculado pelo servidor, mas podemos destacar o maior aqui localmente para o HUD
-    const currentKing = [...s.snakes].sort((a,b) => b.score - a.score)[0];
-    if (currentKing) {
+    s.snakes = s.snakes.filter(s => !s.dead);
+    s.orbs = s.orbs.filter(o => o.absorbProgress < 1);
+    s.particles.forEach(p => p.update(dt));
+    s.particles = s.particles.filter(p => p.life > 0);
+
+    if (s.snakes.length > 0) {
+      let currentKing = s.snakes[0];
+      for (let i = 1; i < s.snakes.length; i++) {
+        if (s.snakes[i].score > currentKing.score) {
+          currentKing = s.snakes[i];
+        }
+      }
+      
+      if (s.lastKingId !== currentKing.id) {
+        if (currentKing.isPlayer && s.lastKingId !== null) {
+          s.audio.play('king', 0.8);
+        }
+        s.lastKingId = currentKing.id;
+      }
+
       s.snakes.forEach(snk => snk.isKing = (snk === currentKing));
     }
 
